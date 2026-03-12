@@ -1,0 +1,115 @@
+##Versione con finestra adattiva e non fissata a 30
+
+def GroupSolutionCP1(signals_event):
+    n_sensors = signals_event.shape[0]
+    timings = []
+    
+    min_dist = 100 
+    time_tol = 4
+    
+    act_times = [[], []] 
+    qs_flags = [[], []]
+
+    for i in range(n_sensors):
+        #Calcolo la derivata prima e identifico i minimi locali
+        ds = np.diff(signals_event[i, :])
+        min_indices = argrelextrema(ds, np.less)[0]
+        
+        selected = []
+        qs_status = [False, False]
+        
+        #Se trovo minimi locali, ordino per profondità e seleziono i primi 2 che rispettano la distanza minima
+        if len(min_indices) > 0:
+            depths = ds[min_indices]
+            sorted_args = np.argsort(depths)
+            candidates = min_indices[sorted_args]
+            
+            for idx in candidates:
+                if len(selected) == 0:
+                    selected.append(idx)
+                elif len(selected) == 1:
+                    #Salvo solo se è sufficientemente distante dal primo
+                    if abs(idx - selected[0]) >= min_dist:
+                        selected.append(idx)
+                        break
+            #Riordino
+            selected.sort()
+            
+            #Faccio filtro QS sulla base del rapporto tra max positivo e max negativo attorno al minimo locale
+            for j, val in enumerate(selected):
+            # Finestra adattiva basata sulla half-width del minimo della derivata
+                half_val = ds[val] / 2.0
+                left, right = val, val
+
+                while left > 0 and ds[left - 1] < half_val:
+                    left -= 1
+                while right < len(ds) - 1 and ds[right + 1] < half_val:
+                    right += 1
+                qrs_width = max(right - left, 10)
+
+                window_start = max(0, val - qrs_width * 2)
+                window_end   = min(signals_event.shape[1], val + qrs_width * 2)
+
+                # Baseline robusta con mediana su finestra pre-evento
+                baseline_seg = signals_event[i, max(0, window_start - 20) : window_start]
+                baseline = np.median(baseline_seg) if len(baseline_seg) > 0 else 0.0
+
+                # Componenti positive sia prima che dopo il minimo
+                max_pos_pre  = np.max(signals_event[i, window_start : val])   - baseline
+                max_pos_post = np.max(signals_event[i, val : window_end])     - baseline
+                max_neg      = abs(np.min(signals_event[i, val : window_end]) - baseline)
+
+                amp_total = np.max(np.abs(signals_event[i, window_start:window_end] - baseline))
+
+                if (max_pos_pre  < 0.25 * max_neg and
+                    max_pos_post < 0.35 * max_neg and
+                    max_neg      > 0.30 * amp_total):
+                    qs_status[j] = True 
+
+        #Se non trovo minimi locali, o se ne trovo solo 1, riempio con NaN per uniformare la matrice
+        row_time = [None, None]
+        for j in range(len(selected)):
+            row_time[j] = int(selected[j])
+        
+        row_final = [t if t is not None else np.nan for t in row_time]
+        timings.append(row_final)
+
+        #Salvo tempi e flag QS per il calcolo di LS
+        for j in range(2):
+            t_val = row_final[j] if not np.isnan(row_final[j]) else np.inf
+            act_times[j].append(t_val)
+            qs_flags[j].append(qs_status[j])
+
+    #Calcolo LS
+    LS_array = np.zeros((n_sensors, 2))
+
+    for j in range(2):
+        times = np.array(act_times[j])
+        flags = np.array(qs_flags[j])
+        
+        #Trovo il sensore che si attiva prima e considero come focus tutti quelli che si attivano entro time_tol da questo
+        if np.any(np.isfinite(times)):
+            min_t = np.min(times)
+            focus_idxs = [idx for idx, t in enumerate(times) if t <= min_t + time_tol]
+            qs_candidates = [idx for idx in focus_idxs if flags[idx]]   #Filtro quelli che hanno QS positivo
+            
+            #Se ho 1 candidato, assegno 1. Se sono 2, valuto e assegno 0.5 
+            if qs_candidates:
+                qs_candidates.sort(key=lambda x: times[x])
+                
+                if len(qs_candidates) == 1:
+                    LS_array[qs_candidates[0], j] = 1.0
+                
+                else:
+                    t0 = times[qs_candidates[0]]
+                    t1 = times[qs_candidates[1]]
+                                        
+                    if abs(t1 - t0) <= time_tol:
+                        LS_array[qs_candidates[0], j] = 0.5
+                        LS_array[qs_candidates[1], j] = 0.5
+                    else:
+                        LS_array[qs_candidates[0], j] = 1.0
+
+    LS = LS_array.tolist()
+    
+    return timings, LS
