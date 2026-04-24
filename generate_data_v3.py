@@ -4,16 +4,13 @@ generate_data_v3.py  –  Dataset sintetico migliorato per Checkpoint 2
 Modifiche rispetto alla v2:
   1. r ~ log-Uniform(0.05, 0.8): più lesioni piccole (allineato ai dati reali)
   2. V_SLOW ~ Uniform(5, 30): robustezza a velocità SC diverse
-  3. a_ratio aggiunto in X come feature di input (indice X[:,46])
-  4. Struttura X (47-dim):
+  3. Struttura X (46-dim):
        [0:20]  AT beat1 assoluti (ms)
        [20:40] AT beat2 assoluti (ms)
        [40:42] focal point 1 (x0, y0)
        [42:44] focal point 2 (x1, y1)
        [44:46] tempi stimolazione (t_0, t_1) ms
-       [46]    a_ratio  ← NUOVO
-  5. Struttura Y (3-dim): [xc, yc, r]  ← a_ratio rimosso dal target
-       (a_ratio ora è un input noto, non da predire ciecamente)
+  4. Struttura Y (4-dim): [xc, yc, r, a_ratio] 
 """
 
 import numpy as np
