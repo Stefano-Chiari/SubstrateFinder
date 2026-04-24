@@ -3,7 +3,7 @@ generate_data_v3.py  –  Dataset sintetico migliorato per Checkpoint 2
 
 Modifiche rispetto alla v2:
   1. r ~ log-Uniform(0.05, 0.8): più lesioni piccole (allineato ai dati reali)
-  2. V_SLOW ~ Uniform(5, 30): robustezza a velocità SC diverse
+  2. V_SLOW = 19.80
   3. Struttura X (46-dim):
        [0:20]  AT beat1 assoluti (ms)
        [20:40] AT beat2 assoluti (ms)
@@ -110,9 +110,8 @@ def generate_single_sample(seed_offset, X_mesh, Y_mesh, sensor_rows, sensor_cols
       [40:42] focal point 1 (x0, y0)
       [42:44] focal point 2 (x1, y1)
       [44:46] tempi stimolazione (t_0, t_1) ms
-      [46]    a_ratio
 
-    Y (3-dim): [xc, yc, r]
+    Y (3-dim): [xc, yc, r, a:ratio]
     """
     rng = np.random.default_rng(seed=42 + seed_offset)
 
@@ -157,7 +156,7 @@ def generate_single_sample(seed_offset, X_mesh, Y_mesh, sensor_rows, sensor_cols
         [x0_1, y0_1],           #  2: focal point 1
         [x0_2, y0_2],           #  2: focal point 2
         [t_0,  t_1]             #  2: tempi stimolazione
-    ])                          # Totale: 47-dim
+    ])                          # Totale: 46-dim
 
     target = np.array([xc, yc, r, a_ratio])  
     return features, target
