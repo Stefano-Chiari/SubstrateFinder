@@ -208,3 +208,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Dati di training rigenerabili (troppo grandi / non necessari al deliverable)
+X_train.npy
+X_train_B.npy
+X_train_resid.npy
+y_train.npy
