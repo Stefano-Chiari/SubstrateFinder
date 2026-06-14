@@ -21,13 +21,14 @@ Da lanciare tu: `python forward_model.py` esegue il sanity-check.
 
 import numpy as np
 import heapq
+from scipy.signal import savgol_filter, argrelextrema
 
 # ---------------------------------------------------------------------------
 # Costanti del problema (dal notebook)
 # ---------------------------------------------------------------------------
 DOMAIN = (-2.0, 2.0)
 N_GRID = 401                 # griglia fedele 401x401
-V_FAST =  80.0              # velocita' tessuto sano
+V_FAST = 80.0                # velocita' tessuto sano
 V_SLOW = 20.0                # velocita' nella lesione (slow conduction)
 THETA_FIBER = 0.0            # orientazione fibre (fissa nel generatore)
 
@@ -194,29 +195,63 @@ _X_MESH, _Y_MESH = np.meshgrid(np.linspace(DOMAIN[0], DOMAIN[1], N_GRID),
 
 
 def _sample_at_sensors(act_map):
-    """Estrae i valori della mappa di attivazione ai 20 sensori (ordine corretto)."""
+    """Estrae il tempo di attivazione ai 20 sensori dalla mappa FMM.
+
+    La mappa act_map (401x401) contiene, per ogni nodo (i,j) della griglia,
+    il tempo minimo (in unita' di griglia, NON ancora in ms) che il fronte
+    impiega a raggiungere quel punto partendo dal focal point.
+
+    Per ogni sensore k:
+      1. Troviamo il nodo della griglia piu' vicino alla posizione (sx,sy)
+         del sensore -> indici (i_sel, j_sel).
+      2. Leggiamo act_map[i_sel, j_sel]: questo e' il tempo di percorrenza
+         lungo il percorso geodetico ottimale dal focal al sensore,
+         tenendo conto dell'anisotropia e della lesione.
+      3. Questo valore, moltiplicato per 1e3 e sommato all'offset t0,
+         da' il tempo di attivazione in ms (vedi forward_activation_times).
+
+    Non c'e' nessuna soglia o criterio di "quando scatta l'attivazione":
+    l'FMM risolve direttamente il problema di minimo-tempo, quindi il valore
+    nella mappa E' gia' il tempo di arrivo del fronte a quel punto.
+    """
     out = np.empty(len(SENSOR_LOCS))
     for k, (sx, sy) in enumerate(SENSOR_LOCS):
+        # distanza euclidea quadratica da ogni nodo della griglia al sensore k
         MeasMat = (_X_MESH - sx)**2 + (_Y_MESH - sy)**2
+        # nodo piu' vicino al sensore
         i_sel, j_sel = np.unravel_index(MeasMat.argmin(), MeasMat.shape)
+        # tempo di arrivo del fronte a quel nodo = tempo di attivazione al sensore
         out[k] = act_map[i_sel, j_sel]
     return out
 
 
 def forward_activation_times(x0, y0, t0, x1, y1, t1,
-                             a_ratio, xc, yc, r):
+                             a_ratio, xc, yc, r,
+                             v_fast=V_FAST, v_slow=V_SLOW):
     """Restituisce (t_front0[20], t_front1[20]) in ms.
 
-    Due fronti indipendenti (le attivita' focali non si sovrappongono),
-    quindi risolviamo l'eikonale separatamente per ciascuna sorgente.
-    t0, t1 sono i tempi iniziali in ms.
+    Procedura:
+      1. Costruisce il tensore di anisotropia D^{-1} da a_ratio.
+      2. Costruisce il campo di velocita': v_fast fuori dalla lesione,
+         v_slow dentro (cerchio di centro (xc,yc) e raggio r).
+      3. Risolve l'FMM a partire da ciascun focal point con t_start=0.
+         La mappa risultante contiene i tempi di percorrenza in unita'
+         di griglia (dominio [-2,2], N=401 nodi -> passo h=4/400=0.01).
+      4. Campiona la mappa ai 20 sensori con _sample_at_sensors.
+      5. Converte in ms (* 1e3) e aggiunge l'offset temporale t0/t1.
+
+    Nota sulla conversione: l'FMM risolve l'eikonale nella metrica
+    anisotropa con velocita' v(x,y). Il tempo ha unita' [lunghezza/velocita'].
+    Con lunghezze in unita' del dominio ([-2,2]) e velocita' in mm/s,
+    il risultato e' in secondi * qualcosa. Il fattore 1e3 converte nella
+    stessa scala dei segnali (campioni ~ ms). Le velocita' stimate (65.5/22.9)
+    assorbono questa calibrazione.
     """
     s11, s12, s22 = build_D_inv(a_ratio)
-    speed = make_speed_field(xc, yc, r)
+    speed = make_speed_field(xc, yc, r, v_slow=v_slow, v_fast=v_fast)
 
-    # NB: nel notebook l'FMM parte da t0=0 e poi i tempi sono *1e3 (in ms).
-    # Qui partiamo direttamente con offset t0/t1 in ms NON moltiplicato:
-    # risolviamo con t_start=0, convertiamo in ms, poi aggiungiamo l'offset.
+    # risolviamo con t_start=0 per entrambe le sorgenti (l'offset t0/t1
+    # viene aggiunto dopo, cosi' i due fronti restano indipendenti)
     map0 = anisotropic_FMM(x0, y0, 0.0, _X_MESH, _Y_MESH, speed, s11, s12, s22)
     map1 = anisotropic_FMM(x1, y1, 0.0, _X_MESH, _Y_MESH, speed, s11, s12, s22)
 
@@ -288,3 +323,84 @@ if __name__ == "__main__":
         print("  forward front1 (ms), primi 5 sensori:", np.round(tf1[:5], 1))
         print("  osservati (indice campione) primi 5  :",
               obs[:5].tolist())
+
+
+# ---------------------------------------------------------------------------
+# Estrazione tempi di attivazione dai segnali (logica CP1)
+# Definita qui (non in estimate_velocities) perche' serve sia al generatore
+# del dataset sia a GroupSolutionCP2, senza dipendenze aggiuntive.
+# ---------------------------------------------------------------------------
+def extract_times_and_weights(signals_event, t0, t1, min_dist=100):
+    """Per ogni sensore restituisce tempi di attivazione e pesi di affidabilita'.
+
+    Parametri
+    ---------
+    signals_event : (20, 501) segnali unipolari
+    t0, t1        : tempi iniziali dei due fronti (ms) - usati per l'ordine
+    min_dist      : distanza minima in campioni tra i due minimi della derivata
+
+    Ritorna
+    -------
+    t_front0, t_front1 : array (20,) tempi in campioni (= ms)
+    w_front0, w_front1 : array (20,) pesi di affidabilita' in [0,1]
+    """
+    sig = savgol_filter(signals_event, window_length=11, polyorder=3, axis=1)
+    n = sig.shape[0]
+    t_f0 = np.full(n, np.nan); t_f1 = np.full(n, np.nan)
+    w_f0 = np.zeros(n);        w_f1 = np.zeros(n)
+
+    for i in range(n):
+        ds = np.gradient(sig[i])
+        mins = argrelextrema(ds, np.less)[0]
+        if len(mins) == 0:
+            continue
+        cand = mins[np.argsort(ds[mins])]   # piu' profondi prima
+        sel = []
+        for idx in cand:
+            if not sel:
+                sel.append(idx)
+            elif len(sel) == 1 and abs(idx - sel[0]) >= min_dist:
+                sel.append(idx)
+                break
+        sel.sort()                          # ordine temporale crescente
+        for j, idx in enumerate(sel):
+            depth = -ds[idx]
+            w = max(depth, 0.0)
+            if j == 0:
+                t_f0[i] = idx; w_f0[i] = w
+            else:
+                t_f1[i] = idx; w_f1[i] = w
+
+    if np.nansum(w_f0) > 0: w_f0 = w_f0 / np.nanmax(w_f0)
+    if np.nansum(w_f1) > 0: w_f1 = w_f1 / np.nanmax(w_f1)
+    return t_f0, t_f1, w_f0, w_f1
+
+
+# ---------------------------------------------------------------------------
+# Tempi di attivazione in mezzo OMOGENEO (senza lesione) - forma analitica.
+# Nel mezzo omogeneo anisotropo il tempo di arrivo a un sensore e' la distanza
+# nella metrica D^-1 divisa per v_fast. NON serve l'FMM: formula chiusa,
+# istantanea. Usata per calcolare il RESIDUO (osservato - omogeneo) che isola
+# l'effetto della lesione, sia in training sia in GroupSolutionCP2 al test.
+#
+# IMPORTANTE: i tempi OSSERVATI (sia nel dataset sintetico sia nei segnali
+# reali) sono estratti col minimo della derivata, che cade MORPH_SHIFT ms
+# PRIMA del tempo fisico di arrivo. Per avere un residuo ~0 dove non c'e'
+# lesione, anche il tempo omogeneo deve includere lo stesso shift -> si
+# sottrae MORPH_SHIFT. Senza questo, il residuo ha un offset costante di
+# -MORPH_SHIFT su ogni sensore che sommerge l'effetto (debole) della lesione.
+# ---------------------------------------------------------------------------
+MORPH_SHIFT = 3.0   # ms - stesso valore usato nella sintesi del segnale
+
+
+def homogeneous_times(focal_x, focal_y, t_start, a_ratio, v_fast=V_FAST):
+    """Tempi (ms) di arrivo ai 20 sensori in mezzo omogeneo anisotropo,
+    allineati ai tempi estratti con CP1 (minimo della derivata).
+
+    t[k] = sqrt( (s_k - f)^T M (s_k - f) ) / v_fast * 1e3 + t_start - MORPH_SHIFT
+    """
+    s11, s12, s22 = build_D_inv(a_ratio)
+    M = np.array([[s11, s12], [s12, s22]])
+    d = SENSOR_LOCS - np.array([focal_x, focal_y])      # (20, 2)
+    dist = np.sqrt(np.einsum('ij,jk,ik->i', d, M, d))
+    return dist / v_fast * 1e3 + t_start - MORPH_SHIFT
