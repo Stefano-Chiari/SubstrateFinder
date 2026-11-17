@@ -1,3 +1,22 @@
+# SubstrateFinder – Cardiac Electrophysiology Inverse Problem
+
+Team project for *Scientific Computing Tools for Advanced Mathematical Modelling*,
+Politecnico di Milano (2026), with Simone Milani and Lorenzo Sciacca.
+
+**Goal:** locate and reconstruct slow-conduction regions in the atria (atrial fibrillation)
+from electrogram recordings.
+
+**Method:** anisotropic eikonal model solved with the Fast Marching Method; a physics-based
+Nelder–Mead inversion replaced by neural networks trained offline; an 8-dimensional
+DeepSDF-style generative model of the conduction field with an encoder from activation times;
+data augmentation based on the physical symmetries of the problem.
+
+**Results:** focal localisation solved almost exactly; lesion centre, radius and full field
+recovered with a single network forward pass, with no solver calls at inference time.
+
+**Report:** [full report](docs/report.pdf)
+
+---
 # SubstrateFinder
 
 # BeatFinder
